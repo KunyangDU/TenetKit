@@ -40,8 +40,9 @@ CoverageReport/
 *.profdata
 *.profraw
 
-# ── Claude Code internal memory (not part of the project) ────────────────────
+# ── Claude Code internal files ────────────────────────────────────────────────
 memory/
+.claude/settings.local.json  # user-local permissions; not shared
 
 # ── Temporary / scratch ───────────────────────────────────────────────────────
 *.tmp
