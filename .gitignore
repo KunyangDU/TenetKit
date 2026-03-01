@@ -48,3 +48,6 @@ memory/
 *.tmp
 *.log
 scratch/
+
+# ── Gemini materials ───────────────────────────────────────────────────────
+materials/

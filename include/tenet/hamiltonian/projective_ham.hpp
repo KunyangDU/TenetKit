@@ -23,7 +23,9 @@ public:
                                 SparseRightEnvTensor<B> envR,
                                 std::optional<SparseMPO<B>*> H,
                                 std::vector<std::pair<int,int>> valid_inds,
-                                double E0 = 0.0);
+                                double E0 = 0.0,
+                                int site1 = -1,
+                                int site2 = -1);
 
     const SparseLeftEnvTensor<B>&  env_left()   const { return envL_; }
     const SparseRightEnvTensor<B>& env_right()  const { return envR_; }
@@ -31,6 +33,11 @@ public:
 
     // The number of active sites (0, 1, or 2)
     int n_sites() const noexcept { return n_sites_; }
+    int site1()   const noexcept { return site1_; }
+    int site2()   const noexcept { return site2_; }
+
+    const std::optional<SparseMPO<B>*>&    H()          const { return H_; }
+    const std::vector<std::pair<int,int>>& valid_inds() const { return valid_inds_; }
 
 private:
     SparseLeftEnvTensor<B>           envL_;
@@ -39,6 +46,8 @@ private:
     std::vector<std::pair<int,int>>  valid_inds_;
     double                           E0_;
     int                              n_sites_ = 1;
+    int                              site1_   = -1;
+    int                              site2_   = -1;
 };
 
 // ── Factory functions ─────────────────────────────────────────────────────────
