@@ -14,7 +14,10 @@ namespace tenet {
 template<TensorBackend B = DenseBackend>
 class SparseMPO {
 public:
-    explicit SparseMPO(int L) : L_(L), sites_(L, SparseMPOTensor<B>(1, 1)) {}
+    explicit SparseMPO(int L) : L_(L) {
+        sites_.reserve(L);
+        for (int i = 0; i < L; ++i) sites_.emplace_back(1, 1);
+    }
 
     SparseMPOTensor<B>&       operator[](int i)       { return sites_[i]; }
     const SparseMPOTensor<B>& operator[](int i) const { return sites_[i]; }

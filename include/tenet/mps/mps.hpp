@@ -22,7 +22,7 @@ public:
     using Space      = typename B::Space;
     using SiteTensor = MPSTensor<B>;
 
-    explicit DenseMPS(int L);
+    explicit DenseMPS(int L) : L_(L), sites_(L) {}
 
     // Site access (0-indexed)
     SiteTensor&       operator[](int i)       { return sites_[i]; }
@@ -77,6 +77,12 @@ public:
 private:
     Base& base_;
 };
+
+// Out-of-class inline definition (Adjoint must be fully defined first).
+template<TensorBackend B>
+inline Adjoint<DenseMPS<B>> DenseMPS<B>::adjoint() {
+    return Adjoint<DenseMPS<B>>(*this);
+}
 
 // Default alias (users write MPS, not DenseMPS<DenseBackend>)
 using MPS = DenseMPS<DenseBackend>;
