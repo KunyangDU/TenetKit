@@ -4,6 +4,8 @@
 // types.  Integration tests exercise the full Phase-1 DMRG pipeline.
 
 #include <gtest/gtest.h>
+#include <iomanip>
+#include <iostream>
 #include "tenet/algorithm/dmrg.hpp"
 #include "tenet/local_space/spin.hpp"
 #include "tenet/intr_tree/interaction_node.hpp"
@@ -240,6 +242,16 @@ TEST(DMRGIntegration, Dmrg2AgreesDmrg1) {
 
     auto r1 = dmrg1(env1, cfg);
     auto r2 = dmrg2(env2, cfg);
+
+    std::cout << "\n[EnergyPrint] Heisenberg L=" << L << " D=" << D << "\n"
+              << "  dmrg1 E = " << std::fixed << std::setprecision(10)
+              << r1.ground_energy
+              << "  (converged=" << r1.converged
+              << ", sweeps=" << r1.history.size() << ")\n"
+              << "  dmrg2 E = " << r2.ground_energy
+              << "  (converged=" << r2.converged
+              << ", sweeps=" << r2.history.size() << ")\n"
+              << "  |ΔE|    = " << std::abs(r1.ground_energy - r2.ground_energy) << "\n";
 
     // Both should converge to the same energy within 1e-3
     EXPECT_NEAR(r1.ground_energy, r2.ground_energy, 1e-3);

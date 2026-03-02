@@ -10,6 +10,11 @@
 //
 // push_right: new_EL[j] = sum_i contract(EL[i], ket, H[i,j], bra)
 // push_left:  new_ER[i] = sum_j contract(ket, H[i,j], bra, ER[j])
+//
+// Parallelism (§14.2 of design doc):
+//   Non-zero MPO entries are independent → parallelise over them with OpenMP.
+//   Heavy tensor contractions run in parallel; accumulation into per-slot
+//   accumulators is protected by a named critical section.
 
 #include "tenet/environment/env_push.hpp"
 #include "tenet/core/tensor_ops.hpp"
@@ -17,6 +22,13 @@
 
 #include <cassert>
 #include <memory>
+#include <optional>
+#include <tuple>
+#include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace tenet {
 
@@ -94,31 +106,48 @@ push_right(const SparseLeftEnvTensor<DenseBackend>& L,
     int D_out = H_site.d_out();
     assert(L.dim() == D_in);
 
-    SparseLeftEnvTensor<DenseBackend> result(D_out);
-
     const DenseTensor& ket      = psi_site.data();
     DenseTensor        bra_data = psi_site.adjoint().data();
 
+    // Collect non-zero (row, col, op*) triplets — serial, fast
+    using Task = std::tuple<int, int, const AbstractLocalOperator<DenseBackend>*>;
+    std::vector<Task> tasks;
+    tasks.reserve(D_in * D_out);
     for (int i = 0; i < D_in; ++i) {
         if (!L.has(i)) continue;
-        const DenseTensor& el = L[i]->data();
-
         for (int j = 0; j < D_out; ++j) {
             if (!H_site.has(i, j)) continue;
-            const auto* op = H_site(i, j);
-
-            DenseTensor contrib = op->is_identity()
-                ? push_right_identity(el, ket, bra_data)
-                : push_right_local(el, ket, op->matrix(), bra_data);
-
-            if (!result.has(j)) {
-                result.set(j, std::make_unique<LeftEnvTensor<DenseBackend>>(std::move(contrib)));
-            } else {
-                result[j]->data().axpby({1, 0}, {1, 0}, contrib);
-            }
+            tasks.emplace_back(i, j, H_site(i, j));
         }
     }
 
+    // Per-column accumulators
+    std::vector<std::optional<DenseTensor>> accum(D_out);
+
+    // Parallel over independent MPO entries; accumulation is critical
+    #pragma omp parallel for schedule(dynamic) if(tasks.size() > 4)
+    for (int t = 0; t < static_cast<int>(tasks.size()); ++t) {
+        auto [i, j, op] = tasks[t];
+        const DenseTensor& el = L[i]->data();
+        DenseTensor contrib = op->is_identity()
+            ? push_right_identity(el, ket, bra_data)
+            : push_right_local(el, ket, op->matrix(), bra_data);
+
+        #pragma omp critical(env_push_accum)
+        {
+            if (!accum[j].has_value())
+                accum[j] = std::move(contrib);
+            else
+                accum[j]->axpby({1, 0}, {1, 0}, contrib);
+        }
+    }
+
+    SparseLeftEnvTensor<DenseBackend> result(D_out);
+    for (int j = 0; j < D_out; ++j) {
+        if (accum[j].has_value())
+            result.set(j, std::make_unique<LeftEnvTensor<DenseBackend>>(
+                            std::move(*accum[j])));
+    }
     return result;
 }
 
@@ -132,30 +161,48 @@ push_left(const SparseRightEnvTensor<DenseBackend>& R,
     int D_out = H_site.d_out();
     assert(R.dim() == D_out);
 
-    SparseRightEnvTensor<DenseBackend> result(D_in);
-
     const DenseTensor& ket      = psi_site.data();
     DenseTensor        bra_data = psi_site.adjoint().data();
 
+    // Collect non-zero (row, col, op*) triplets — serial, fast
+    using Task = std::tuple<int, int, const AbstractLocalOperator<DenseBackend>*>;
+    std::vector<Task> tasks;
+    tasks.reserve(D_in * D_out);
     for (int i = 0; i < D_in; ++i) {
         for (int j = 0; j < D_out; ++j) {
             if (!H_site.has(i, j)) continue;
             if (!R.has(j)) continue;
-            const auto* op = H_site(i, j);
-            const DenseTensor& er = R[j]->data();
-
-            DenseTensor contrib = op->is_identity()
-                ? push_left_identity(ket, bra_data, er)
-                : push_left_local(ket, op->matrix(), bra_data, er);
-
-            if (!result.has(i)) {
-                result.set(i, std::make_unique<RightEnvTensor<DenseBackend>>(std::move(contrib)));
-            } else {
-                result[i]->data().axpby({1, 0}, {1, 0}, contrib);
-            }
+            tasks.emplace_back(i, j, H_site(i, j));
         }
     }
 
+    // Per-row accumulators
+    std::vector<std::optional<DenseTensor>> accum(D_in);
+
+    // Parallel over independent MPO entries; accumulation is critical
+    #pragma omp parallel for schedule(dynamic) if(tasks.size() > 4)
+    for (int t = 0; t < static_cast<int>(tasks.size()); ++t) {
+        auto [i, j, op] = tasks[t];
+        const DenseTensor& er = R[j]->data();
+        DenseTensor contrib = op->is_identity()
+            ? push_left_identity(ket, bra_data, er)
+            : push_left_local(ket, op->matrix(), bra_data, er);
+
+        #pragma omp critical(env_push_accum)
+        {
+            if (!accum[i].has_value())
+                accum[i] = std::move(contrib);
+            else
+                accum[i]->axpby({1, 0}, {1, 0}, contrib);
+        }
+    }
+
+    SparseRightEnvTensor<DenseBackend> result(D_in);
+    for (int i = 0; i < D_in; ++i) {
+        if (accum[i].has_value())
+            result.set(i, std::make_unique<RightEnvTensor<DenseBackend>>(
+                            std::move(*accum[i])));
+    }
     return result;
 }
 

@@ -12,12 +12,23 @@
 // Two-site contraction:
 //   With local ops hl, hr:
 //     x[-1,-2,-3;-4] = El[-1,1]*psi[1,2,3,4]*hl[-2,2]*hr[-3,3]*Er[4,-4]
+//
+// Parallelism (§14.2 of design doc):
+//   Valid (i,j) pairs (and (i,k,j) triplets for two-site) are independent.
+//   Collect all tasks first, then parallelise contractions with OpenMP;
+//   accumulation into `result` is protected by a named critical section.
 
 #include "tenet/hamiltonian/ham_action.hpp"
 #include "tenet/core/tensor_ops.hpp"
 #include "tenet/core/dense_tensor.hpp"
 
 #include <cassert>
+#include <tuple>
+#include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace tenet {
 
@@ -112,20 +123,34 @@ DenseTensor apply(const SparseProjectiveHamiltonian<DenseBackend>& H_eff,
     const SparseMPO<DenseBackend>& H = **H_eff.H();
     const SparseMPOTensor<DenseBackend>& Hs = H[H_eff.site1()];
 
-    DenseTensor result(psi.spaces());
-
+    // Collect valid tasks — serial, fast
+    using Task = std::tuple<int, int, const AbstractLocalOperator<DenseBackend>*>;
+    std::vector<Task> tasks;
     for (auto [i, j] : H_eff.valid_inds()) {
         const auto* el_ptr = H_eff.env_left()[i];
         const auto* er_ptr = H_eff.env_right()[j];
         if (!el_ptr || !er_ptr) continue;
         const auto* op = Hs(i, j);
         if (!op) continue;
+        tasks.emplace_back(i, j, op);
+    }
 
+    DenseTensor result(psi.spaces());
+
+    // Parallel contractions; accumulate into result under critical
+    #pragma omp parallel for schedule(dynamic) if(tasks.size() > 4)
+    for (int t = 0; t < static_cast<int>(tasks.size()); ++t) {
+        auto [i, j, op] = tasks[t];
+        const DenseTensor& el = H_eff.env_left()[i]->data();
+        const DenseTensor& er = H_eff.env_right()[j]->data();
         DenseTensor contrib = op->is_identity()
-            ? action1_identity(el_ptr->data(), psi, er_ptr->data())
-            : action1_local(el_ptr->data(), psi, op->matrix(), er_ptr->data());
+            ? action1_identity(el, psi, er)
+            : action1_local(el, psi, op->matrix(), er);
 
-        result.axpby({1, 0}, {1, 0}, contrib);
+        #pragma omp critical(ham_action_accum)
+        {
+            result.axpby({1, 0}, {1, 0}, contrib);
+        }
     }
 
     if (H_eff.energy_offset() != 0.0)
@@ -147,28 +172,41 @@ DenseTensor apply2(const SparseProjectiveHamiltonian<DenseBackend>& H_eff,
     const SparseMPOTensor<DenseBackend>& Hs2 = H[s2];
     int D_mid = Hs1.d_out();
 
-    DenseTensor result(psi_ab.spaces());
-
+    // Collect valid (i,k,j) tasks — serial, fast
+    using Task = std::tuple<int, int, int,
+                            const AbstractLocalOperator<DenseBackend>*,
+                            const AbstractLocalOperator<DenseBackend>*>;
+    std::vector<Task> tasks;
     for (auto [i, j] : H_eff.valid_inds()) {
         const auto* el_ptr = H_eff.env_left()[i];
         const auto* er_ptr = H_eff.env_right()[j];
         if (!el_ptr || !er_ptr) continue;
-        const DenseTensor& el = el_ptr->data();
-        const DenseTensor& er = er_ptr->data();
-
         for (int k = 0; k < D_mid; ++k) {
             if (!Hs1.has(i, k) || !Hs2.has(k, j)) continue;
             const auto* op1 = Hs1(i, k);
             const auto* op2 = Hs2(k, j);
             if (!op1 || !op2) continue;
+            tasks.emplace_back(i, k, j, op1, op2);
+        }
+    }
 
-            bool id1 = op1->is_identity(), id2 = op2->is_identity();
-            DenseTensor contrib;
-            if      (!id1 && !id2) contrib = action2_local(el, psi_ab, op1->matrix(), op2->matrix(), er);
-            else if ( id1 && !id2) contrib = action2_id_local(el, psi_ab, op2->matrix(), er);
-            else if (!id1 &&  id2) contrib = action2_local_id(el, psi_ab, op1->matrix(), er);
-            else                   contrib = action2_id_id(el, psi_ab, er);
+    DenseTensor result(psi_ab.spaces());
 
+    // Parallel contractions; accumulate into result under critical
+    #pragma omp parallel for schedule(dynamic) if(tasks.size() > 4)
+    for (int t = 0; t < static_cast<int>(tasks.size()); ++t) {
+        auto [i, k, j, op1, op2] = tasks[t];
+        const DenseTensor& el = H_eff.env_left()[i]->data();
+        const DenseTensor& er = H_eff.env_right()[j]->data();
+        bool id1 = op1->is_identity(), id2 = op2->is_identity();
+        DenseTensor contrib;
+        if      (!id1 && !id2) contrib = action2_local(el, psi_ab, op1->matrix(), op2->matrix(), er);
+        else if ( id1 && !id2) contrib = action2_id_local(el, psi_ab, op2->matrix(), er);
+        else if (!id1 &&  id2) contrib = action2_local_id(el, psi_ab, op1->matrix(), er);
+        else                   contrib = action2_id_id(el, psi_ab, er);
+
+        #pragma omp critical(ham_action_accum)
+        {
             result.axpby({1, 0}, {1, 0}, contrib);
         }
     }
