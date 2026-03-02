@@ -51,3 +51,6 @@ scratch/
 
 # ── Gemini materials ───────────────────────────────────────────────────────
 materials/
+
+# ── Local design docs (planning material, not for distribution) ───────────────
+docs/
