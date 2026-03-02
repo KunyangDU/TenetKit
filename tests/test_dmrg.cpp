@@ -12,6 +12,7 @@
 #include "tenet/intr_tree/add_interaction.hpp"
 #include "tenet/intr_tree/local_operator.hpp"
 #include "tenet/core/space.hpp"
+#include "test_lattice.hpp"
 
 namespace tenet::test {
 
@@ -277,6 +278,140 @@ TEST(DMRGIntegration, ConvergenceFlagSet) {
     EXPECT_TRUE(result.converged)
         << "DMRG should converge for L=" << L << " with D=" << D
         << " within " << cfg.max_sweeps << " sweeps";
+}
+
+// ── 2D integration test ───────────────────────────────────────────────────────
+
+// DMRG2 on the 4×4 YC Heisenberg cylinder.
+// This test exercises:
+//   1. Long-range MPO (periodic Y bonds span Ly-1 sites in 1D representation)
+//   2. Two-site sweeps with non-trivial environment updates
+// The test only checks that the run completes and produces a physically
+// reasonable ground-state energy (significantly below zero).
+TEST(DMRGIntegration, YCHeisenberg4x4_Dmrg2)
+{
+    const int Lx = 4, Ly = 4;
+    const int L  = Lx * Ly;   // 16 sites
+    const int D  = 20;
+
+    auto H = make_yc_heisenberg_mpo(Lx, Ly);
+    std::vector<TrivialSpace> phys(L, TrivialSpace(2));
+    auto psi = DenseMPS<>::random(L, D, phys);
+
+    DMRGConfig cfg;
+    cfg.max_sweeps = 10;
+    cfg.E_tol      = 1e-4;
+    cfg.trunc      = TruncParams{D, 1e-10, false};
+
+    Environment<> env(psi, H);
+    auto result = dmrg2(env, cfg);
+
+    std::cout << "\n[YC4x4 dmrg2] E_0 = " << std::fixed << std::setprecision(8)
+              << result.ground_energy
+              << "  converged=" << result.converged
+              << "  sweeps=" << result.history.size() << "\n";
+
+    // For J=1 Heisenberg AFM on 4×4 YC cylinder the energy should be
+    // well below zero (each of the 12 bonds contributes ~-0.4 J).
+    EXPECT_LT(result.ground_energy, -2.0)
+        << "DMRG2 ground energy for 4x4 YC Heisenberg should be significantly negative";
+}
+
+// DMRG1 on the 4×4 YC Heisenberg cylinder.
+// Single-site sweeps; no bond-dimension growth via SVD.
+// Prints detailed per-sweep and per-site energy information.
+TEST(DMRGIntegration, YCHeisenberg4x4_Dmrg1)
+{
+    const int Lx = 4, Ly = 4;
+    const int L  = Lx * Ly;   // 16 sites
+    const int D  = 20;
+
+    auto H = make_yc_heisenberg_mpo(Lx, Ly);
+    std::vector<TrivialSpace> phys(L, TrivialSpace(2));
+    auto psi = DenseMPS<>::random(L, D, phys);
+
+    DMRGConfig cfg;
+    cfg.max_sweeps = 10;
+    cfg.E_tol      = 1e-4;
+    cfg.trunc      = TruncParams{D, 1e-10, false};
+
+    Environment<> env(psi, H);
+    auto result = dmrg1(env, cfg);
+
+    std::cout << "\n[YC4x4 dmrg1] E_0 = " << std::fixed << std::setprecision(8)
+              << result.ground_energy
+              << "  converged=" << result.converged
+              << "  sweeps=" << result.history.size() << "\n";
+
+    // Print per-sweep ground energies.
+    std::cout << "  sweep history (ground_energy per half-sweep):\n";
+    for (std::size_t sw = 0; sw < result.history.size(); ++sw) {
+        const auto& h = result.history[sw];
+        std::cout << "    sweep " << std::setw(2) << h.sweep
+                  << "  E = " << std::setprecision(10) << h.ground_energy;
+        if (h.converged) std::cout << "  [converged, dE=" << h.delta_energy << "]";
+        std::cout << "\n";
+    }
+
+    // Print site energies from the final half-sweep.
+    if (!result.history.empty()) {
+        const auto& last = result.history.back();
+        if (!last.site_energies.empty()) {
+            std::cout << "  site energies (final half-sweep):\n    ";
+            for (int s = 0; s < L; ++s) {
+                std::cout << std::setprecision(6) << last.site_energies[s];
+                if (s < L - 1) std::cout << "  ";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    EXPECT_LT(result.ground_energy, -2.0)
+        << "DMRG1 ground energy for 4x4 YC Heisenberg should be significantly negative";
+}
+
+// DMRG1 vs DMRG2 on the 4×4 YC Heisenberg cylinder.
+// Both algorithms start from independent random MPS and should converge
+// to the same ground-state energy within a loose tolerance.
+TEST(DMRGIntegration, YCHeisenberg4x4_Dmrg2AgreesDmrg1)
+{
+    const int Lx = 4, Ly = 4;
+    const int L  = Lx * Ly;   // 16 sites
+    const int D  = 20;
+
+    auto H1 = make_yc_heisenberg_mpo(Lx, Ly);
+    auto H2 = make_yc_heisenberg_mpo(Lx, Ly);
+
+    std::vector<TrivialSpace> phys(L, TrivialSpace(2));
+    auto psi1 = DenseMPS<>::random(L, D, phys);
+    auto psi2 = DenseMPS<>::random(L, D, phys);
+
+    DMRGConfig cfg;
+    cfg.max_sweeps = 10;
+    cfg.E_tol      = 1e-4;
+    cfg.trunc      = TruncParams{D, 1e-10, false};
+
+    Environment<> env1(psi1, H1);
+    Environment<> env2(psi2, H2);
+
+    auto r1 = dmrg1(env1, cfg);
+    auto r2 = dmrg2(env2, cfg);
+
+    std::cout << "\n[YC4x4 comparison] Lx=" << Lx << " Ly=" << Ly << " D=" << D << "\n"
+              << "  dmrg1 E = " << std::fixed << std::setprecision(10)
+              << r1.ground_energy
+              << "  (converged=" << r1.converged
+              << ", sweeps=" << r1.history.size() << ")\n"
+              << "  dmrg2 E = " << r2.ground_energy
+              << "  (converged=" << r2.converged
+              << ", sweeps=" << r2.history.size() << ")\n"
+              << "  |ΔE|    = " << std::setprecision(6)
+              << std::abs(r1.ground_energy - r2.ground_energy) << "\n";
+
+    // Both should land in the same energy basin.
+    // Loose tolerance: D=20 may not be fully converged for 4×4 2D.
+    EXPECT_NEAR(r1.ground_energy, r2.ground_energy, 5e-2)
+        << "DMRG1 and DMRG2 should agree on the 4x4 YC Heisenberg ground energy";
 }
 
 } // namespace tenet::test

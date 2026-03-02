@@ -2,6 +2,11 @@
 //
 // DMRG ground-state optimisation: single-site and two-site variants.
 // See docs/C++重构设计方案.md §13.
+//
+// Numerical details (matching Julia reference):
+//   • Energy shift E₀ = ⟨ψ|H|ψ⟩ is computed at each site before the Lanczos
+//     solve and passed to proj1/proj2.  The Lanczos eigenvalue Eg is relative
+//     to the shifted Hamiltonian; the total site energy is E₀ + Eg.
 
 #include "tenet/algorithm/dmrg.hpp"
 #include "tenet/core/factorization.hpp"
@@ -10,12 +15,10 @@
 #include "tenet/hamiltonian/ham_action.hpp"
 #include "tenet/hamiltonian/projective_ham.hpp"
 #include "tenet/krylov/lanczos.hpp"
-#include "tenet/mps/canonical.hpp"
 #include "tenet/mps/mps_tensor.hpp"
 
 #include <cassert>
 #include <cmath>
-#include <iostream>
 #include <limits>
 
 namespace tenet {
@@ -30,6 +33,14 @@ LanczosConfig make_lanczos_cfg(const DMRGConfig& cfg)
     lc.max_iter   = cfg.max_krylov_iter;
     lc.tol        = cfg.krylov_tol;
     return lc;
+}
+
+// Compute ⟨ψ|H|ψ⟩ from the unshifted effective Hamiltonian at a site.
+// Requires psi in mixed-canonical form with centre at `site`.
+double site_energy(const SparseProjectiveHamiltonian<DenseBackend>& H_eff,
+                   const DenseTensor&                                 psi_s)
+{
+    return inner(psi_s, apply(H_eff, psi_s)).real();
 }
 } // anonymous namespace
 
@@ -48,17 +59,21 @@ void dmrg_sweep<DenseBackend>(Environment<DenseBackend>& env,
     info.site_energies.assign(L, 0.0);
 
     for (int site = 0; site < L; ++site) {
-        // Build 1-site effective Hamiltonian and optimise
-        auto H_eff = proj1(env, site, 0.0);
+        // Compute E₀ = ⟨ψ|H|ψ⟩ at the current centre before Lanczos.
+        auto H_plain = proj1(env, site, 0.0);
+        double E0    = site_energy(H_plain, psi[site].data());
+
+        // Build shifted effective Hamiltonian and find ground state.
+        auto H_eff = proj1(env, site, E0);
         auto results = lanczos_eigs(
             [&H_eff](const DenseTensor& v) { return apply(H_eff, v); },
             psi[site].data(), 1, lcfg);
 
-        info.site_energies[site] = results[0].eigenvalue;
+        // Total energy = E₀ (shift) + Eg (eigenvalue of shifted H).
+        info.site_energies[site] = E0 + results[0].eigenvalue;
         psi[site].data() = std::move(results[0].eigenvector);
 
         if (site < L - 1) {
-            // Left-canonicalize psi[site], push R into psi[site+1]
             Eigen::MatrixXcd R     = psi[site].left_canonicalize();
             int              new_dl = static_cast<int>(R.rows());
             Eigen::MatrixXcd new_M  = R * psi[site + 1].as_matrix_right();
@@ -92,17 +107,18 @@ void dmrg_sweep<DenseBackend>(Environment<DenseBackend>& env,
     info.site_energies.assign(L, 0.0);
 
     for (int site = L - 1; site >= 0; --site) {
-        // Build 1-site effective Hamiltonian and optimise
-        auto H_eff = proj1(env, site, 0.0);
+        auto H_plain = proj1(env, site, 0.0);
+        double E0    = site_energy(H_plain, psi[site].data());
+
+        auto H_eff = proj1(env, site, E0);
         auto results = lanczos_eigs(
             [&H_eff](const DenseTensor& v) { return apply(H_eff, v); },
             psi[site].data(), 1, lcfg);
 
-        info.site_energies[site] = results[0].eigenvalue;
+        info.site_energies[site] = E0 + results[0].eigenvalue;
         psi[site].data() = std::move(results[0].eigenvector);
 
         if (site > 0) {
-            // Right-canonicalize psi[site], push L into psi[site-1]
             Eigen::MatrixXcd L_mat  = psi[site].right_canonicalize();
             int              new_dr = static_cast<int>(L_mat.cols());
             Eigen::MatrixXcd new_M  = psi[site - 1].as_matrix_left() * L_mat;
@@ -113,7 +129,6 @@ void dmrg_sweep<DenseBackend>(Environment<DenseBackend>& env,
                 TrivialSpace(psi[site - 1].phys_dim()),
                 TrivialSpace(new_dr));
 
-            // push_left(site) updates right_envs_[site] using psi[site]
             env.push_left(site);
             psi.set_center(site - 1, site - 1);
         }
@@ -138,29 +153,29 @@ void dmrg_sweep<DenseBackend>(Environment<DenseBackend>& env,
     info.site_energies.assign(L - 1, 0.0);
 
     for (int site = 0; site < L - 1; ++site) {
-        // Merge two-site tensor: (D_l, d_l, D_m) x (D_m, d_r, D_r) → (D_l, d_l, d_r, D_r)
         DenseTensor psi_ab = contract(psi[site].data(), psi[site + 1].data(), {{2, 0}});
 
-        auto H_eff = proj2(env, site, site + 1, 0.0);
+        // E₀ from unshifted two-site H_eff.
+        auto H_plain = proj2(env, site, site + 1, 0.0);
+        double E0    = inner(psi_ab, apply2(H_plain, psi_ab)).real();
+
+        auto H_eff = proj2(env, site, site + 1, E0);
         auto results = lanczos_eigs(
             [&H_eff](const DenseTensor& v) { return apply2(H_eff, v); },
             psi_ab, 1, lcfg);
 
-        info.site_energies[site] = results[0].eigenvalue;
+        info.site_energies[site] = E0 + results[0].eigenvalue;
         psi_ab = std::move(results[0].eigenvector);
 
-        // SVD with truncation; split at leg 2: (D_l, d_l | d_r, D_r)
         SVDResult s = svd(psi_ab, 2, cfg.trunc);
         int D_new = s.bond_dim;
 
-        // psi[site] = U (left-canonical), shape (D_l, d_l, D_new)
         psi[site].data() = s.U;
 
-        // psi[site+1] = diag(S) * Vt, shape (D_new, d_r, D_r)
         int d_r = psi[site + 1].phys_dim();
         int D_r = psi[site + 1].right_dim();
-        Eigen::MatrixXcd Vt_mat  = s.Vt.matricize({0}, {1, 2});    // (D_new, d_r*D_r)
-        Eigen::MatrixXcd SVt_mat = s.S.asDiagonal() * Vt_mat;      // (D_new, d_r*D_r)
+        Eigen::MatrixXcd Vt_mat  = s.Vt.matricize({0}, {1, 2});
+        Eigen::MatrixXcd SVt_mat = s.S.asDiagonal() * Vt_mat;
 
         psi[site + 1] = MPSTensor<DenseBackend>::from_right_matrix(
             SVt_mat,
@@ -168,7 +183,6 @@ void dmrg_sweep<DenseBackend>(Environment<DenseBackend>& env,
             TrivialSpace(d_r),
             TrivialSpace(D_r));
 
-        // push_right(site) updates left_envs_[site+1] using psi[site]=U
         env.push_right(site);
         psi.set_center(site + 1, site + 1);
     }
@@ -192,33 +206,26 @@ void dmrg_sweep<DenseBackend>(Environment<DenseBackend>& env,
     info.site_energies.assign(L - 1, 0.0);
 
     for (int site = L - 2; site >= 0; --site) {
-        // Merge two-site tensor
-        double n_site   = psi[site].data().norm();
-        double n_site1  = psi[site + 1].data().norm();
         DenseTensor psi_ab = contract(psi[site].data(), psi[site + 1].data(), {{2, 0}});
-        double n_psiab = psi_ab.norm();
 
-        auto H_eff = proj2(env, site, site + 1, 0.0);
+        auto H_plain = proj2(env, site, site + 1, 0.0);
+        double E0    = inner(psi_ab, apply2(H_plain, psi_ab)).real();
+
+        auto H_eff = proj2(env, site, site + 1, E0);
         auto results = lanczos_eigs(
             [&H_eff](const DenseTensor& v) { return apply2(H_eff, v); },
             psi_ab, 1, lcfg);
 
-        info.site_energies[site] = results[0].eigenvalue;
-        std::cerr << "[R2L debug] site=" << site << " E=" << results[0].eigenvalue
-                  << " n[site]=" << n_site << " n[site+1]=" << n_site1
-                  << " n_psiab=" << n_psiab
-                  << " vinds=" << H_eff.valid_inds().size() << "\n";
+        info.site_energies[site] = E0 + results[0].eigenvalue;
         psi_ab = std::move(results[0].eigenvector);
 
-        // SVD with truncation; split at leg 2
         SVDResult s = svd(psi_ab, 2, cfg.trunc);
         int D_new = s.bond_dim;
 
-        // psi[site] = U * diag(S), shape (D_l, d_l, D_new)
         int d_l = psi[site].phys_dim();
         int D_l = psi[site].left_dim();
-        Eigen::MatrixXcd U_mat  = s.U.matricize({0, 1}, {2});    // (D_l*d_l, D_new)
-        Eigen::MatrixXcd US_mat = U_mat * s.S.asDiagonal();      // (D_l*d_l, D_new)
+        Eigen::MatrixXcd U_mat  = s.U.matricize({0, 1}, {2});
+        Eigen::MatrixXcd US_mat = U_mat * s.S.asDiagonal();
 
         psi[site] = MPSTensor<DenseBackend>::from_left_matrix(
             US_mat,
@@ -226,10 +233,8 @@ void dmrg_sweep<DenseBackend>(Environment<DenseBackend>& env,
             TrivialSpace(d_l),
             TrivialSpace(D_new));
 
-        // psi[site+1] = Vt (right-canonical), shape (D_new, d_r, D_r)
         psi[site + 1].data() = s.Vt;
 
-        // push_left(site+1) updates right_envs_[site+1] using psi[site+1]=Vt
         env.push_left(site + 1);
         psi.set_center(site, site);
     }
@@ -245,7 +250,6 @@ DMRGResult<DenseBackend> dmrg1(Environment<DenseBackend>& env, const DMRGConfig&
     int L = env.length();
     auto& psi = env.psi();
 
-    // Initialise: right-canonical form with center at site 0
     psi.right_canonicalize(0, L - 1);
     psi.set_center(0, 0);
     env.build_all();
@@ -293,7 +297,6 @@ DMRGResult<DenseBackend> dmrg2(Environment<DenseBackend>& env, const DMRGConfig&
     int L = env.length();
     auto& psi = env.psi();
 
-    // Initialise: right-canonical form with center at site 0
     psi.right_canonicalize(0, L - 1);
     psi.set_center(0, 0);
     env.build_all();

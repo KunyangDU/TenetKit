@@ -30,3 +30,9 @@ tenet_add_test(test_observables    test_observables.cpp)
 # ── New: local-space and utility tests ────────────────────────────────────────
 tenet_add_test(test_local_space    test_local_space.cpp)
 tenet_add_test(test_utils          test_utils.cpp)
+
+# ── SETTN tests (free_fermion_ref.hpp 在 tests/ 目录下，需额外 include 路径) ────
+add_executable(test_settn test_settn.cpp)
+target_link_libraries(test_settn PRIVATE tenet GTest::gtest_main)
+target_include_directories(test_settn PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+gtest_discover_tests(test_settn)

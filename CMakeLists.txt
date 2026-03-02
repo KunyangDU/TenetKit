@@ -30,14 +30,24 @@ add_library(tenet STATIC
     src/mps/mps.cpp
     src/mps/mpo.cpp
     src/mps/canonical.cpp
+    src/mps/dense_mpo_tensor.cpp
+    src/mps/dense_mpo.cpp
 
     # Environment
     src/environment/environment.cpp
     src/environment/env_push.cpp
+    src/environment/mpo_env_push.cpp
+    src/environment/two_layer_mpo_env.cpp
 
     # Hamiltonian
     src/hamiltonian/projective_ham.cpp
     src/hamiltonian/ham_action.cpp
+    src/hamiltonian/mpo_ham_action.cpp
+
+    # Algebra
+    src/algebra/mpo_trace.cpp
+    src/algebra/mpo_mul.cpp
+    src/algebra/mpo_axpy.cpp
 
     # Interaction tree (sparse MPO builder)
     src/intr_tree/interaction_tree.cpp

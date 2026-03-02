@@ -20,11 +20,13 @@ struct DMRGSweepInfo {
 };
 
 struct TDVPSweepInfo {
-    int    step         = 0;
-    double time         = 0.0;
-    double norm         = 1.0;
-    double norm_error   = 0.0;
+    int    step           = 0;
+    double time           = 0.0;
+    double norm           = 1.0;
+    double norm_error     = 0.0;
     double truncation_err = 0.0;
+    double E              = 0.0;   // energy estimate ⟨ψ|H|ψ⟩ at step start
+    double lnZ            = 0.0;   // accumulated log(Z) increment (imaginary-time)
 };
 
 struct CBEInfo {

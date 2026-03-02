@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <random>
 #include <stdexcept>
 #include <vector>
@@ -111,6 +112,19 @@ SVDResult svd(const DenseTensor& T, int split_at, const TruncParams& trunc) {
     Eigen::MatrixXcd U = solver.matrixU();
     Eigen::MatrixXcd V = solver.matrixV();
 
+    // BDCSVD can occasionally return NaN singular vectors for complex matrices.
+    // Fall back to the more numerically stable JacobiSVD in that case.
+    if (!std::isfinite(U.norm()) || !std::isfinite(V.norm()) || !std::isfinite(S.norm())) {
+        std::fprintf(stderr,
+            "[tenet] svd: BDCSVD returned non-finite values (%ldx%ld matrix); "
+            "retrying with JacobiSVD.\n",
+            static_cast<long>(M.rows()), static_cast<long>(M.cols()));
+        Eigen::JacobiSVD<Eigen::MatrixXcd> solver2(M, Eigen::ComputeThinU | Eigen::ComputeThinV);
+        S = solver2.singularValues();
+        U = solver2.matrixU();
+        V = solver2.matrixV();
+    }
+
     int k = static_cast<int>(S.size());
     double trunc_err = 0.0;
 
@@ -133,9 +147,11 @@ SVDResult svd(const DenseTensor& T, int split_at, const TruncParams& trunc) {
         // Truncation error = Σ_{i>=k_keep} σ_i^2
         for (int i = k_keep; i < k; ++i) trunc_err += S(i) * S(i);
 
-        S = S.head(k_keep);
-        U = U.leftCols(k_keep);
-        V = V.leftCols(k_keep);
+        // Use conservativeResize / eval() to avoid Eigen aliasing when
+        // resizing a vector/matrix and reading from a sub-block of itself.
+        S.conservativeResize(k_keep);
+        U.conservativeResize(Eigen::NoChange, k_keep);
+        V.conservativeResize(Eigen::NoChange, k_keep);
         k = k_keep;
     }
 

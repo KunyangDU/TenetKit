@@ -13,6 +13,7 @@
 #include "tenet/core/space.hpp"
 #include "tenet/process_control/config.hpp"
 #include "tenet/process_control/sweep_info.hpp"
+#include "test_lattice.hpp"
 
 namespace tenet::test {
 
@@ -239,9 +240,10 @@ TEST(TDVPIntegration, Tdvp2AgreesTdvp1) {
         << "TDVP1 norm=" << info1.norm << " vs TDVP2 norm=" << info2.norm;
 }
 
-// Imaginary-time TDVP must break unitarity and change the norm.
-// For τ = {0, −dt}, exp(α H) = exp(−H·dt/2) is NOT unitary,
-// so ‖ψ‖ must deviate from 1 after several steps.
+// Imaginary-time TDVP normalises the MPS after each half-sweep and
+// accumulates the log-partition-function increment in info.lnZ.
+// For the Heisenberg AFM (E₀ < 0), d(lnZ)/dβ = −⟨E⟩ > 0, so lnZ must
+// grow positive after several imaginary-time steps.
 TEST(TDVPIntegration, ImaginaryTimeConvergesToGround) {
     const int L = 4;
     const int D = 8;
@@ -261,28 +263,94 @@ TEST(TDVPIntegration, ImaginaryTimeConvergesToGround) {
     env.build_all();
 
     // Imaginary-time step: τ = {0, −dt}
-    //   α_fwd = {τ.imag()/2, −τ.real()/2} = {−dt/2, 0}  → exp(−H·dt/2)
     const double dt = 0.1;
     std::complex<double> tau_imag{0.0, -dt};
 
-    double last_norm = 1.0;
-    bool norm_changed = false;
-
+    double total_lnZ = 0.0;
     for (int step = 0; step < 8; ++step) {
         auto info = tdvp1_step(env, tau_imag, cfg);
-        if (std::abs(info.norm - 1.0) > 1e-6)
-            norm_changed = true;
-        last_norm = info.norm;
+        total_lnZ += info.lnZ;
+        // After normalisation the MPS norm is always 1.
+        EXPECT_NEAR(info.norm, 1.0, 1e-6)
+            << "Imaginary-time TDVP norm deviated from 1 at step " << step;
     }
 
-    // Imaginary-time evolution must break unitarity
-    EXPECT_TRUE(norm_changed)
-        << "Imaginary-time TDVP unexpectedly conserved the norm exactly";
+    // For Heisenberg AFM (E₀ < 0): lnZ must accumulate positively with β.
+    EXPECT_GT(total_lnZ, 0.0)
+        << "Imaginary-time TDVP: total_lnZ=" << total_lnZ
+        << " should be positive for Heisenberg AFM";
 
-    // After β = 8 × dt = 0.8, ‖ψ‖ must have changed noticeably from 1
-    EXPECT_GT(std::abs(last_norm - 1.0), 1e-4)
-        << "Imaginary-time TDVP: norm=" << last_norm
-        << " has not changed sufficiently after 8 steps";
+    // After β = 8 × dt = 0.8, the accumulated lnZ should be non-trivial.
+    EXPECT_GT(total_lnZ, 0.05)
+        << "Imaginary-time TDVP: total_lnZ=" << total_lnZ
+        << " did not grow sufficiently after 8 steps";
+}
+
+// ── 2D TDVP integration tests ──────────────────────────────────────────────
+
+// TDVP1 real-time evolution on a 2×4 YC Heisenberg cylinder.
+// Exercises TDVP with a long-range MPO (periodic Y bonds span Ly-1 sites).
+// exp(-iHτ) is unitary → ‖ψ‖ must be conserved.
+TEST(TDVPIntegration, YCHeisenberg2x4_Tdvp1Norm)
+{
+    const int Lx = 2, Ly = 4;
+    const int L  = Lx * Ly;   // 8 sites
+    const int D  = 10;
+
+    auto H = make_yc_heisenberg_mpo(Lx, Ly);
+    std::vector<TrivialSpace> phys(L, TrivialSpace(2));
+    auto psi = DenseMPS<>::random(L, D, phys);
+
+    TDVPConfig cfg;
+    cfg.krylov_dim = 16;
+    cfg.krylov_tol = 1e-10;
+    cfg.trunc      = TruncParams{D, 0.0, false};
+
+    Environment<> env(psi, H);
+    psi.right_canonicalize(0, L - 1);
+    psi.set_center(0, 0);
+    env.build_all();
+
+    const double dt = 0.05;
+    for (int step = 0; step < 5; ++step) {
+        auto info = tdvp1_step(env, {dt, 0.0}, cfg);
+        EXPECT_NEAR(info.norm, 1.0, 1e-4)
+            << "YC2x4 TDVP1 norm deviated at step " << step
+            << ": norm=" << info.norm;
+    }
+}
+
+// TDVP2 real-time evolution on a 2×4 YC Heisenberg cylinder.
+// Verifies the two-site variant also conserves the norm on a 2D geometry.
+// Tolerance is looser (3e-4) than TDVP1 because two-site SVD truncation
+// introduces a small per-step norm error that accumulates over sweeps.
+TEST(TDVPIntegration, YCHeisenberg2x4_Tdvp2Norm)
+{
+    const int Lx = 2, Ly = 4;
+    const int L  = Lx * Ly;   // 8 sites
+    const int D  = 10;
+
+    auto H = make_yc_heisenberg_mpo(Lx, Ly);
+    std::vector<TrivialSpace> phys(L, TrivialSpace(2));
+    auto psi = DenseMPS<>::random(L, D, phys);
+
+    TDVPConfig cfg;
+    cfg.krylov_dim = 16;
+    cfg.krylov_tol = 1e-10;
+    cfg.trunc      = TruncParams{D, 0.0, false};
+
+    Environment<> env(psi, H);
+    psi.right_canonicalize(0, L - 1);
+    psi.set_center(0, 0);
+    env.build_all();
+
+    const double dt = 0.05;
+    for (int step = 0; step < 5; ++step) {
+        auto info = tdvp2_step(env, {dt, 0.0}, cfg);
+        EXPECT_NEAR(info.norm, 1.0, 3e-4)
+            << "YC2x4 TDVP2 norm deviated at step " << step
+            << ": norm=" << info.norm;
+    }
 }
 
 // ── DISABLED_: stubs for future CBE/SETTN modules ─────────────────────────
