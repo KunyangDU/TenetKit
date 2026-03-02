@@ -25,6 +25,7 @@ tenet_add_test(test_lanczos        test_lanczos.cpp)
 # ── Integration / algorithm tests ─────────────────────────────────────────────
 tenet_add_test(test_dmrg           test_dmrg.cpp)
 tenet_add_test(test_tdvp           test_tdvp.cpp)
+tenet_add_test(test_observables    test_observables.cpp)
 
 # ── New: local-space and utility tests ────────────────────────────────────────
 tenet_add_test(test_local_space    test_local_space.cpp)

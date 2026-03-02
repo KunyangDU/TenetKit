@@ -19,9 +19,11 @@ public:
     // psi and H are stored as non-owning references.
     Environment(DenseMPS<B>& psi, SparseMPO<B>& H);
 
-    DenseMPS<B>&  psi() { return *psi_; }
-    SparseMPO<B>& H()   { return *H_;   }
-    int           length() const noexcept { return L_; }
+    DenseMPS<B>&        psi()       { return *psi_; }
+    const DenseMPS<B>&  psi() const { return *psi_; }
+    SparseMPO<B>&       H()         { return *H_;   }
+    const SparseMPO<B>& H()   const { return *H_;   }
+    int                 length() const noexcept { return L_; }
 
     // Access cached environment tensors.
     // left_env(0)  = left boundary (always initialised).

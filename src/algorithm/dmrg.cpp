@@ -15,6 +15,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <iostream>
 #include <limits>
 
 namespace tenet {
@@ -192,7 +193,10 @@ void dmrg_sweep<DenseBackend>(Environment<DenseBackend>& env,
 
     for (int site = L - 2; site >= 0; --site) {
         // Merge two-site tensor
+        double n_site   = psi[site].data().norm();
+        double n_site1  = psi[site + 1].data().norm();
         DenseTensor psi_ab = contract(psi[site].data(), psi[site + 1].data(), {{2, 0}});
+        double n_psiab = psi_ab.norm();
 
         auto H_eff = proj2(env, site, site + 1, 0.0);
         auto results = lanczos_eigs(
@@ -200,6 +204,10 @@ void dmrg_sweep<DenseBackend>(Environment<DenseBackend>& env,
             psi_ab, 1, lcfg);
 
         info.site_energies[site] = results[0].eigenvalue;
+        std::cerr << "[R2L debug] site=" << site << " E=" << results[0].eigenvalue
+                  << " n[site]=" << n_site << " n[site+1]=" << n_site1
+                  << " n_psiab=" << n_psiab
+                  << " vinds=" << H_eff.valid_inds().size() << "\n";
         psi_ab = std::move(results[0].eigenvector);
 
         // SVD with truncation; split at leg 2

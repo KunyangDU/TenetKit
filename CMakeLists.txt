@@ -43,6 +43,7 @@ add_library(tenet STATIC
     src/intr_tree/interaction_tree.cpp
 
     # Observables
+    src/observables/add_observable.cpp
     src/observables/cal_observable.cpp
 
     # Algorithms
